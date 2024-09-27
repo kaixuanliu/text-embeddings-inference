@@ -18,6 +18,12 @@ To use [🤗 text-embeddings-inference](https://github.com/huggingface/text-embe
 
    docker run -p 8080:80 -v $volume:/data --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none -e MAX_WARMUP_SEQUENCE_LENGTH=512 --cap-add=sys_nice --ipc=host ghcr.io/huggingface/tei-gaudi:latest --model-id $model --pooling cls
    ```
+   For models within `Transformers library` that need to add `trust_remote_code=True` param to support customized implementations, please set ENV param `-e TRUST_REMOTE_CODE=TRUE` within `docker run` command line. Here is an example:
+   ```
+   model="Alibaba-NLP/gte-large-en-v1.5"
+   volume=$PWD/data # share a volume with the Docker container to avoid downloading weights every run
+
+   docker run -p 8080:80 -v $volume:/data --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none -e MAX_WARMUP_SEQUENCE_LENGTH=512 -e TRUST_REMOTE_CODE=TRUE --cap-add=sys_nice --ipc=host ghcr.io/huggingface/tei-gaudi:latest --model-id $model --pooling cls
 3. You can then send a request:
    ```bash
     curl 127.0.0.1:8080/embed \
