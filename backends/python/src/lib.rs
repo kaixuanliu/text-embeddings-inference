@@ -28,14 +28,10 @@ impl PythonBackend {
         match model_type {
             ModelType::Classifier => {}
             ModelType::Embedding(pool) => {
-                match pool {
-                    Pool::Splade => {
-                        return Err(BackendError::Start(format!("{pool:?} is not supported")));
-                    },
-                    _ => {
-                        pool_type = pool;
-                    }
+                if pool == Pool::Splade {
+                    return Err(BackendError::Start(format!("{pool:?} is not supported")));
                 }
+                pool_type = pool;
             }
         };
 
