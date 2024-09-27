@@ -5,6 +5,7 @@ from loguru import logger
 from pathlib import Path
 from typing import Type, List
 from transformers import AutoModel
+from sentence_transformers.models import Pooling
 from opentelemetry import trace
 
 from habana_frameworks.torch.hpu import wrap_in_hpu_graph
@@ -17,18 +18,26 @@ tracer = trace.get_tracer(__name__)
 
 
 class DefaultModel(Model):
-    def __init__(self,
-                model_path: Path,
-                device: torch.device,
-                dtype: torch.dtype,
-                trust_remote: bool=False):
+    def __init__(
+        self,
+        model_path: Path,
+        device: torch.device,
+        dtype: torch.dtype,
+        pool: str = "cls",
+        trust_remote: bool = False,
+    ):
         if device == torch.device("hpu"):
             adapt_transformers_to_gaudi()
-        model = AutoModel.from_pretrained(model_path, trust_remote_code=trust_remote).to(dtype).to(device)
+        model = (
+            AutoModel.from_pretrained(model_path, trust_remote_code=trust_remote)
+            .to(dtype)
+            .to(device)
+        )
         if device == torch.device("hpu"):
             logger.info("Use graph mode for HPU")
             model = wrap_in_hpu_graph(model, disable_tensor_cache=True)
         self.hidden_size = model.config.hidden_size
+        self.pooling = Pooling(self.hidden_size, pooling_mode=pool)
         position_offset = 0
         model_type = model.config.model_type
         if model_type in ["xlm-roberta", "camembert", "roberta"]:
@@ -63,7 +72,11 @@ class DefaultModel(Model):
             kwargs["position_ids"] = batch.position_ids
 
         output = self.model(**kwargs)
-        embedding = output[0][:, 0]
+        pooling_features = {
+            "token_embeddings": output[0],
+            "attention_mask": batch.attention_mask,
+        }
+        embedding = self.pooling.forward(pooling_features)["sentence_embedding"]
         cpu_results = embedding.reshape(-1).tolist()
 
         return [
@@ -75,4 +88,6 @@ class DefaultModel(Model):
 
     @tracer.start_as_current_span("predict")
     def predict(self, batch):
-        raise NotImplementedError(f"Predict is not a valid operation for model type {self.model.config.model_type}")
+        raise NotImplementedError(
+            f"Predict is not a valid operation for model type {self.model.config.model_type}"
+        )

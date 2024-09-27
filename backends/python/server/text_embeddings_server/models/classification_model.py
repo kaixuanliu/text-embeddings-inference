@@ -57,7 +57,9 @@ class ClassificationModel(Model):
 
     @tracer.start_as_current_span("embed")
     def embed(self, batch):
-        raise NotImplementedError(f"Embed is not a valid operation for model type {self.model.config.model_type}")
+        raise NotImplementedError(
+            f"Embed is not a valid operation for model type {self.model.config.model_type}"
+        )
 
     @tracer.start_as_current_span("predict")
     def predict(self, batch: PaddedBatch) -> List[Score]:

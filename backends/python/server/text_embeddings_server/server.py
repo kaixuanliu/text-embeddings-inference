@@ -27,7 +27,9 @@ class EmbeddingService(embed_pb2_grpc.EmbeddingServiceServicer):
 
     async def Embed(self, request, context):
         max_input_length = self.model.max_input_length
-        batch = self.model.batch_type.from_pb(request, self.model.device, max_input_length)
+        batch = self.model.batch_type.from_pb(
+            request, self.model.device, max_input_length
+        )
 
         embeddings = self.model.embed(batch)
 
@@ -35,7 +37,9 @@ class EmbeddingService(embed_pb2_grpc.EmbeddingServiceServicer):
 
     async def Predict(self, request, context):
         max_input_length = self.model.max_input_length
-        batch = self.model.batch_type.from_pb(request, self.model.device, max_input_length)
+        batch = self.model.batch_type.from_pb(
+            request, self.model.device, max_input_length
+        )
 
         scores = self.model.predict(batch)
 
@@ -46,6 +50,7 @@ def serve(
     model_path: Path,
     dtype: Optional[str],
     uds_path: Path,
+    pool: str,
 ):
     async def serve_inner(
         model_path: Path,
@@ -54,7 +59,7 @@ def serve(
         unix_socket = f"unix://{uds_path}"
 
         try:
-            model = get_model(model_path, dtype)
+            model = get_model(model_path, dtype, pool)
         except Exception:
             logger.exception("Error when initializing model")
             raise
