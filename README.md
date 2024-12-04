@@ -1,15 +1,13 @@
 # Text Embeddings Inference on Habana Gaudi
 ## Table of contents
-- [Text Embeddings Inference on Habana Gaudi](#text-embeddings-inference-on-habana-gaudi)
-  - [Table of contents](#table-of-contents)
-  - [Get started](#get-started)
-  - [Supported Models](#supported-models)
-    - [Text Embeddings](#text-embeddings)
-    - [Sequence Classification and Re-Ranking](#sequence-classification-and-re-ranking)
-  - [How to Use](#how-to-use)
-    - [Using Re-rankers models](#using-re-rankers-models)
-    - [Using Sequence Classification models](#using-sequence-classification-models)
-    - [Using SPLADE pooling](#using-splade-pooling)
+- [Get started](#get-started)
+- [Supported Models](#supported-models)
+  - [Text Embeddings](#text-embeddings)
+  - [Sequence Classification and Re-Ranking](#sequence-classification-and-re-ranking)
+- [How to Use](#how-to-use)
+  - [Using Re-rankers models](#using-re-rankers-models)
+  - [Using Sequence Classification models](#using-sequence-classification-models)
+  - [Using SPLADE pooling](#using-splade-pooling)
 
 ## Get started
 To use [🤗 text-embeddings-inference](https://github.com/huggingface/text-embeddings-inference) on Habana Gaudi/Gaudi2, follow these steps:
