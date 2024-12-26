@@ -19,6 +19,12 @@ DISABLE_TENSOR_CACHE = os.getenv("DISABLE_TENSOR_CACHE", "false").lower() in [
     "true",
     "1",
 ]
+ALLOW_REDUCED_PRECISION = os.getenv(
+    "ALLOW_REDUCED_PRECISION_FP16_BF16", "true"
+).lower() in [
+    "true",
+    "1",
+]
 
 try:
     import habana_frameworks.torch.core as htcore
@@ -28,6 +34,9 @@ except ImportError as e:
 
 # Disable gradients
 torch.set_grad_enabled(False)
+# WA for perf degradation in pytorch 2.5
+if ALLOW_REDUCED_PRECISION:
+    torch._C._set_math_sdp_allow_fp16_bf16_reduction(True)
 
 FLASH_ATTENTION = True
 try:
