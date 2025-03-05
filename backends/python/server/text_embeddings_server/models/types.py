@@ -91,7 +91,7 @@ class FlashBatch(Batch):
         cu_seqlens = torch.tensor(pb.cu_seq_lengths, dtype=torch.int32, device=device)
         max_length = pb.max_length
         batch_size = len(pb.cu_seq_lengths) - 1
-        query_mask = torch.zero_tensors([batch_size, max_length], dtype=torch.bool)
+        query_mask = torch.zeros([batch_size, max_length], dtype=torch.bool)
         for i, start_index in enumerate(pb.cu_seq_lengths[:-1]):
             end_index = pb.cu_seq_lengths[i + 1]
             input_length = end_index - start_index
@@ -101,7 +101,7 @@ class FlashBatch(Batch):
             [batch_size, 1, 1, max_length],
             device=device,
         ).fill_(float("-inf"))
-        attn_mask[:, :, :, :max_seqlen].masked_fill_(query_mask[:, None, None, :], 0)
+        attn_mask[:, :, :, :max_length].masked_fill_(query_mask[:, None, None, :], 0)
 
         return FlashBatch(
             input_ids=batch_input_ids,

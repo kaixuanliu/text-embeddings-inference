@@ -289,8 +289,8 @@ class FlashBert(Model):
             input_ids=batch.input_ids,
             token_type_ids=batch.token_type_ids,
             position_ids=batch.position_ids,
-            query_mask=batch.query_mask,
-            attention_mask=batch.attn_mask,
+            q_mask=batch.query_mask,
+            attn_mask=batch.attn_mask,
             cu_seqlens=batch.cu_seqlens,
             max_s=batch.max_s,
         )
