@@ -166,7 +166,7 @@ class BertAttention:
         self.num_heads = config.num_attention_heads
         self.device = device
 
-    def forward(self, hidden_states, cu_seqlens, max_s):
+    def forward(self, hidden_states, q_mask, attn_mask, cu_seqlens, max_s):
         residual = hidden_states
 
         qkv = torch.addmm(self.qkv_bias, hidden_states, self.qkv_weight)
@@ -175,7 +175,7 @@ class BertAttention:
         )
 
         attn_output = torch.empty_like(q)
-        attention(q, k, v, attn_output, cu_seqlens, max_s, self.softmax_scale)
+        attention(q, k, v, q_mask, attn_mask, attn_output, cu_seqlens, max_s, self.softmax_scale)
 
         hidden_states = torch.addmm(
             self.dense_bias,
@@ -224,8 +224,8 @@ class BertLayer:
             f"{prefix}.output.LayerNorm", handle, device, dtype, config
         )
 
-    def forward(self, hidden_states, cu_seqlens, max_s):
-        hidden_states = self.attention.forward(hidden_states, cu_seqlens, max_s)
+    def forward(self, hidden_states, q_mask, attn_mask, cu_seqlens, max_s):
+        hidden_states = self.attention.forward(hidden_states, q_mask, attn_mask, cu_seqlens, max_s)
         residual = hidden_states
 
         hidden_states = torch.addmm(
@@ -248,9 +248,9 @@ class BertEncoder:
             for i in range(config.num_hidden_layers)
         ]
 
-    def forward(self, hidden_states, cu_seqlens, max_s):
+    def forward(self, hidden_states, q_mask, attn_mask, cu_seqlens, max_s):
         for layer in self.layers:
-            hidden_states = layer.forward(hidden_states, cu_seqlens, max_s)
+            hidden_states = layer.forward(hidden_states, q_mask, attn_mask, cu_seqlens, max_s)
         return hidden_states
 
 
@@ -259,9 +259,9 @@ class FlashBertModel:
         self.embeddings = BertEmbeddings("embeddings", handle, device, dtype, config)
         self.encoder = BertEncoder("encoder", handle, device, dtype, config)
 
-    def forward(self, input_ids, token_type_ids, position_ids, cu_seqlens, max_s):
+    def forward(self, input_ids, token_type_ids, position_ids, q_mask, attn_mask, cu_seqlens, max_s):
         embeddings = self.embeddings.forward(input_ids, token_type_ids, position_ids)
-        encoder_outputs = self.encoder.forward(embeddings, cu_seqlens, max_s)
+        encoder_outputs = self.encoder.forward(embeddings, q_mask, attn_mask, cu_seqlens, max_s)
 
         return encoder_outputs[cu_seqlens[:-1]]
 
@@ -289,6 +289,8 @@ class FlashBert(Model):
             input_ids=batch.input_ids,
             token_type_ids=batch.token_type_ids,
             position_ids=batch.position_ids,
+            query_mask=batch.query_mask,
+            attention_mask=batch.attn_mask,
             cu_seqlens=batch.cu_seqlens,
             max_s=batch.max_s,
         )
