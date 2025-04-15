@@ -15,11 +15,13 @@ from text_embeddings_server.utils.device import use_ipex
 
 tracer = trace.get_tracer(__name__)
 
+
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
+
 
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     cos = cos.unsqueeze(unsqueeze_dim)
@@ -27,6 +29,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
+
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
@@ -36,15 +39,27 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
         return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
+    hidden_states = hidden_states[:, :, None, :, :].expand(
+        batch, num_key_value_heads, n_rep, slen, head_dim
+    )
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
-class MistralRMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6):
+
+class MistralRMSNorm:
+    def __init__(
+        self,
+        model_path,
+        weight_map,
+        device,
+        dtype,
+        config: MistralConfig,
+        layer_idx: Optional[int] = None,
+        eps=1e-6,
+    ):
         """
         MistralRMSNorm is equivalent to T5LayerNorm
         """
-        super().__init__()
+        hidden_size = config.hidden_size
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
 
@@ -55,6 +70,7 @@ class MistralRMSNorm(nn.Module):
         hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
         return self.weight * hidden_states.to(input_dtype)
 
+
 class MistralRotaryEmbedding(nn.Module):
     def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
         super().__init__()
@@ -62,26 +78,49 @@ class MistralRotaryEmbedding(nn.Module):
         self.dim = dim
         self.max_position_embeddings = max_position_embeddings
         self.base = base
-        inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, dtype=torch.int64).float().to(device) / self.dim))
+        inv_freq = 1.0 / (
+            self.base
+            ** (
+                torch.arange(0, self.dim, 2, dtype=torch.int64).float().to(device)
+                / self.dim
+            )
+        )
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     @torch.no_grad()
     def forward(self, x, position_ids):
-        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+        inv_freq_expanded = (
+            self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+        )
         position_ids_expanded = position_ids[:, None, :].float()
         # Force float32 since bfloat16 loses precision on long contexts
         # See https://github.com/huggingface/transformers/pull/29285
         device_type = x.device.type
-        device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
+        device_type = (
+            device_type
+            if isinstance(device_type, str) and device_type != "mps"
+            else "cpu"
+        )
         with torch.autocast(device_type=device_type, enabled=False):
-            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+            freqs = (
+                inv_freq_expanded.float() @ position_ids_expanded.float()
+            ).transpose(1, 2)
             emb = torch.cat((freqs, freqs), dim=-1)
             cos = emb.cos()
             sin = emb.sin()
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
+
 class MistralAttention:
-    def __init__(self, config: MistralConfig, layer_idx: Optional[int] = None):
+    def __init__(
+        self,
+        model_path,
+        weight_map,
+        device,
+        dtype,
+        config: MistralConfig,
+        layer_idx: Optional[int] = None,
+    ):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
@@ -96,10 +135,18 @@ class MistralAttention:
         self.rope_theta = config.rope_theta
         self.is_causal = True
 
-        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
-        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
-        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
+        self.q_proj = nn.Linear(
+            self.hidden_size, self.num_heads * self.head_dim, bias=False
+        )
+        self.k_proj = nn.Linear(
+            self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False
+        )
+        self.v_proj = nn.Linear(
+            self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False
+        )
+        self.o_proj = nn.Linear(
+            self.num_heads * self.head_dim, self.hidden_size, bias=False
+        )
 
         self.rotary_emb = MistralRotaryEmbedding(
             self.head_dim,
@@ -107,21 +154,27 @@ class MistralAttention:
             base=self.rope_theta,
         )
 
-    def forward(
-        self, hidden_states, position_ids, cu_seqlens, max_s, attn_mask=None
-    ):
+    def forward(self, hidden_states, position_ids, cu_seqlens, max_s, attn_mask=None):
         bsz, q_len, _ = hidden_states.size()
 
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        query_states = query_states.view(
+            bsz, q_len, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+        key_states = key_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
+        value_states = value_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
 
         cos, sin = self.rotary_emb(value_states, position_ids)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        query_states, key_states = apply_rotary_pos_emb(
+            query_states, key_states, cos, sin
+        )
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
@@ -133,9 +186,17 @@ class MistralAttention:
 
         return attn_output
 
-class MistralMLP(nn.Module):
-    def __init__(self, config):
-        super().__init__()
+
+class MistralMLP:
+    def __init__(
+        self,
+        model_path,
+        weight_map,
+        device,
+        dtype,
+        config: MistralConfig,
+        layer_idx: Optional[int] = None,
+    ):
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
@@ -144,17 +205,32 @@ class MistralMLP(nn.Module):
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, hidden_state):
-        return self.down_proj(self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state))
+        return self.down_proj(
+            self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state)
+        )
+
 
 class MistralDecoderLayer:
-    def __init__(self, weight_map, config: MistralConfig, layer_idx, device, dtype):
-        self.hidden_size = config.hidden_size
+    def __init__(
+        self,
+        model_path,
+        weight_map,
+        device,
+        dtype,
+        config: MistralConfig,
+        layer_idx: Optional[int] = None,
+    ):
+        self.attention = MistralAttention(
+            model_path, weight_map, device, dtype, config, layer_idx
+        )
 
-        self.attention = MistralAttention(config=config, layer_idx=layer_idx)
-
-        self.mlp = MistralMLP(config)
-        self.input_layernorm = MistralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = MistralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.mlp = MistralMLP(model_path, weight_map, device, dtype, config, layer_idx)
+        self.input_layernorm = MistralRMSNorm(
+            model_path, weight_map, device, dtype, config, layer_idx
+        )
+        self.post_attention_layernorm = MistralRMSNorm(
+            model_path, weight_map, device, dtype, config, layer_idx
+        )
 
     def forward(self, hidden_states, cu_seqlens, max_s, attn_mask=None):
         residual = hidden_states
@@ -175,6 +251,7 @@ class MistralDecoderLayer:
 
         return hidden_states
 
+
 class FlashMistralModel:
     """
     Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`MistralDecoderLayer`]
@@ -183,13 +260,29 @@ class FlashMistralModel:
         config: MistralConfig
     """
 
-    def __init__(self, weight_map_json, device, dtype, config: MistralConfig):
+    def __init__(
+        self, model_path, weight_map_json, device, dtype, config: MistralConfig
+    ):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-        self.word_embeddings_weight = weight_map_json['weight_map']['embed_tokens.weight'].to(dtype).to(device)
-        self.layers = nn.ModuleList(
-            [MistralDecoderLayer(weight_map_json['weight_map'], config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
-        )
+        target_file = weight_map_json["weight_map"]["embed_tokens.weight"]
+        with safe_open(f"{model_path}/{target_file}", framework="pt") as f:
+            self.word_embeddings_weight = (
+                f.get_tensor("embed_tokens.weight").to(dtype).to(device)
+            )
+
+        self.layers = [
+            MistralDecoderLayer(
+                model_path,
+                weight_map_json["weight_map"],
+                device,
+                dtype,
+                config,
+                layer_idx,
+            )
+            for layer_idx in range(config.num_hidden_layers)
+        ]
+
         self._attn_implementation = config._attn_implementation
         self.norm = MistralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -218,7 +311,9 @@ class FlashMistralModel:
 
 
 class FlashMistral(Model):
-    def __init__(self, model_path: Path, device: torch.device, dtype: torch.dtype, pool: str):
+    def __init__(
+        self, model_path: Path, device: torch.device, dtype: torch.dtype, pool: str
+    ):
         config = MistralConfig.from_pretrained(model_path)
 
         if hasattr(config, "max_seq_length"):
@@ -228,8 +323,8 @@ class FlashMistral(Model):
 
         with open(model_path / "model.safetensors.index.json", "r") as f:
             index_data = json.load(f)
-        
-        model = FlashMistralModel(index_data, device, dtype, config)
+
+        model = FlashMistralModel(model_path, index_data, device, dtype, config)
         self.device = device
         self.dtype = dtype
         if device.type == "hpu":
