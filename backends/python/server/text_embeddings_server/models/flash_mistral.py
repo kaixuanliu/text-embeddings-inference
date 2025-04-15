@@ -280,7 +280,7 @@ class MistralDecoderLayer:
         self.post_attention_layernorm = MistralRMSNorm(
             model_path,
             weight_map,
-            f"layers{layer_idx}.post_attention_layernorm.weight",
+            f"layers.{layer_idx}.post_attention_layernorm.weight",
             device,
             dtype,
         )
@@ -316,14 +316,13 @@ class FlashMistralModel:
     def __init__(
         self, model_path, weight_map_json, device, dtype, config: MistralConfig
     ):
-        self.padding_idx = config.pad_token_id
-        self.vocab_size = config.vocab_size
-        target_file = weight_map_json["weight_map"]["embed_tokens.weight"]
-        with safe_open(f"{model_path}/{target_file}", framework="pt") as f:
-            self.word_embeddings_weight = (
-                f.get_tensor("embed_tokens.weight").to(dtype).to(device)
-            )
-
+        self.word_embeddings_weight = load_weight(
+            model_path,
+            weight_map_json["weight_map"],
+            "embed_tokens.weight",
+            dtype,
+            device,
+        )
         self.layers = [
             MistralDecoderLayer(
                 model_path,
@@ -337,7 +336,14 @@ class FlashMistralModel:
         ]
 
         self._attn_implementation = config._attn_implementation
-        self.norm = MistralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = MistralRMSNorm(
+            model_path,
+            weight_map_json["weight_map"],
+            f"norm.weight",
+            device,
+            dtype,
+            eps=config.rms_norm_eps,
+        )
 
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
