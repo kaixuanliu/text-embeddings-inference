@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from torch import nn
 import torch.nn.functional as F
-from typing import Tuple, List, Union, Optional
+from typing import List, Union, Optional
 from safetensors import safe_open
 from transformers.activations import ACT2FN
 from transformers.models.mistral import MistralConfig
@@ -125,67 +125,87 @@ class MistralAttention:
         config: MistralConfig,
         layer_idx: Optional[int] = None,
     ):
-        super().__init__()
-        self.config = config
-        self.layer_idx = layer_idx
-
-        self.attention_dropout = config.attention_dropout
-        self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.head_dim = config.head_dim
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
-        self.max_position_embeddings = config.max_position_embeddings
-        self.rope_theta = config.rope_theta
-        self.is_causal = True
-
-        self.q_proj = nn.Linear(
-            self.hidden_size, self.num_heads * self.head_dim, bias=False
+        q_proj_weight = load_weight(
+            model_path,
+            weight_map,
+            f"layers.{layer_idx}.self_attn.q_proj.weight",
+            dtype,
+            device,
         )
-        self.k_proj = nn.Linear(
-            self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False
+        k_proj_weight = load_weight(
+            model_path,
+            weight_map,
+            f"layers.{layer_idx}.self_attn.k_proj.weight",
+            dtype,
+            device,
         )
-        self.v_proj = nn.Linear(
-            self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False
+        v_proj_weight = load_weight(
+            model_path,
+            weight_map,
+            f"layers.{layer_idx}.self_attn.v_proj.weight",
+            dtype,
+            device,
         )
-        self.o_proj = nn.Linear(
-            self.num_heads * self.head_dim, self.hidden_size, bias=False
+        self.o_proj_weight = load_weight(
+            model_path,
+            weight_map,
+            f"layers.{layer_idx}.self_attn.o_proj.weight",
+            dtype,
+            device,
+        )
+        self.qkv_weight = (
+            torch.cat([q_proj_weight, k_proj_weight, v_proj_weight])
+            .T.to(dtype)
+            .to(device)
         )
 
         self.rotary_emb = MistralRotaryEmbedding(
             self.head_dim,
-            max_position_embeddings=self.max_position_embeddings,
-            base=self.rope_theta,
+            max_position_embeddings=config.max_position_embeddings,
+            base=config.rope_theta,
         )
 
     def forward(self, hidden_states, position_ids, cu_seqlens, max_s, attn_mask=None):
         bsz, q_len, _ = hidden_states.size()
+        qkv = F.linear(hidden_states, self.qkv_weight.T)
+        if hidden_states.dim() > 2:
+            bs = hidden_states.size(0)
+            q, k, v = qkv.view(bs, -1, self.num_heads * 3, self.head_dim).split(
+                self.num_heads, dim=2
+            )
+        else:
+            q, k, v = qkv.view(-1, self.num_heads * 3, self.head_dim).split(
+                self.num_heads, dim=1
+            )
 
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
+        q = q.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        v = v.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
-        query_states = query_states.view(
-            bsz, q_len, self.num_heads, self.head_dim
-        ).transpose(1, 2)
-        key_states = key_states.view(
-            bsz, q_len, self.num_key_value_heads, self.head_dim
-        ).transpose(1, 2)
-        value_states = value_states.view(
-            bsz, q_len, self.num_key_value_heads, self.head_dim
-        ).transpose(1, 2)
+        cos, sin = self.rotary_emb(v, position_ids)
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        cos, sin = self.rotary_emb(value_states, position_ids)
-        query_states, key_states = apply_rotary_pos_emb(
-            query_states, key_states, cos, sin
+        k = repeat_kv(k, self.num_key_value_groups)
+        v = repeat_kv(v, self.num_key_value_groups)
+
+        attn_output = torch.empty_like(q)
+        attention(
+            q,
+            k,
+            v,
+            attn_output,
+            cu_seqlens,
+            max_s,
+            self.softmax_scale,
+            attn_mask=attn_mask,
         )
-
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(bsz, q_len, -1)
-
         attn_output = self.o_proj(attn_output)
 
         return attn_output
