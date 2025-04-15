@@ -45,6 +45,15 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
+def load_weight(model_path, weight_map, name, dtype, device):
+    """
+    Helper function to load a weight tensor from safetensors.
+    """
+    target_file = weight_map[name]
+    with safe_open(f"{model_path}/{target_file}", framework="pt") as f:
+        return f.get_tensor(name).to(dtype).to(device)
+
+
 class MistralRMSNorm:
     def __init__(
         self,
@@ -199,14 +208,35 @@ class MistralMLP:
     ):
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+        self.gate_proj_weight = load_weight(
+            model_path,
+            weight_map,
+            f"layers.{layer_idx}.mlp.gate_proj.weight",
+            dtype,
+            device,
+        )
+        self.up_proj_weight = load_weight(
+            model_path,
+            weight_map,
+            f"layers.{layer_idx}.mlp.up_proj.weight",
+            dtype,
+            device,
+        )
+        self.down_proj_weight = load_weight(
+            model_path,
+            weight_map,
+            f"layers.{layer_idx}.mlp.down_proj.weight",
+            dtype,
+            device,
+        )
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, hidden_state):
-        return self.down_proj(
-            self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state)
+        gated_hidden_states = F.linear(hidden_state, self.gate_proj_weight.T)
+        uped_hidden_states = F.linear(hidden_state, self.up_proj_weight.T)
+        return F.linear(
+            self.act_fn(gated_hidden_states * uped_hidden_states),
+            self.down_proj_weight.T,
         )
 
 
