@@ -1,4 +1,5 @@
 import torch
+import json
 from pathlib import Path
 from torch import nn
 import torch.nn.functional as F
@@ -125,15 +126,6 @@ class MistralAttention:
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-
-        attn_output = torch.nn.functional.scaled_dot_product_attention(
-            query_states,
-            key_states,
-            value_states,
-            attn_mask=attn_mask,
-            dropout_p=self.attention_dropout if self.training else 0.0,
-        )
-
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(bsz, q_len, -1)
 
@@ -154,9 +146,8 @@ class MistralMLP(nn.Module):
     def forward(self, hidden_state):
         return self.down_proj(self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state))
 
-class MistralDecoderLayer(nn.Module):
-    def __init__(self, config: MistralConfig, layer_idx: int):
-        super().__init__()
+class MistralDecoderLayer:
+    def __init__(self, weight_map, config: MistralConfig, layer_idx, device, dtype):
         self.hidden_size = config.hidden_size
 
         self.attention = MistralAttention(config=config, layer_idx=layer_idx)
@@ -192,13 +183,12 @@ class FlashMistralModel:
         config: MistralConfig
     """
 
-    def __init__(self, config: MistralConfig):
+    def __init__(self, weight_map_json, device, dtype, config: MistralConfig):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+        self.word_embeddings_weight = weight_map_json['weight_map']['embed_tokens.weight'].to(dtype).to(device)
         self.layers = nn.ModuleList(
-            [MistralDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+            [MistralDecoderLayer(weight_map_json['weight_map'], config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
         self._attn_implementation = config._attn_implementation
         self.norm = MistralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -217,13 +207,8 @@ class FlashMistralModel:
         mask=None,
         attn_mask=None,
     ):
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-
-        hidden_states = self.embed_tokens(input_ids)
-
+        inputs_embeds = nn.functional.embedding(input_ids, self.word_embeddings_weight)
+        hidden_states = inputs_embeds
         for layer in self.layers:
             hidden_states = layer.forward(hidden_states, cu_seqlens, max_s, attn_mask)
 
@@ -233,7 +218,7 @@ class FlashMistralModel:
 
 
 class FlashMistral(Model):
-    def __init__(self, model_path: Path, device: torch.device, dtype: torch.dtype):
+    def __init__(self, model_path: Path, device: torch.device, dtype: torch.dtype, pool: str):
         config = MistralConfig.from_pretrained(model_path)
 
         if hasattr(config, "max_seq_length"):
@@ -241,8 +226,10 @@ class FlashMistral(Model):
         else:
             self.max_input_length = config.max_position_embeddings
 
-        with safe_open(model_path / "model.safetensors", framework="pt") as f:
-            model = FlashMistralModel(f, device, dtype, config)
+        with open(model_path / "model.safetensors.index.json", "r") as f:
+            index_data = json.load(f)
+        
+        model = FlashMistralModel(index_data, device, dtype, config)
         self.device = device
         self.dtype = dtype
         if device.type == "hpu":
