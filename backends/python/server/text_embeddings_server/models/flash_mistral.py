@@ -59,17 +59,12 @@ class MistralRMSNorm:
         self,
         model_path,
         weight_map,
+        name,
         device,
         dtype,
-        config: MistralConfig,
-        layer_idx: Optional[int] = None,
         eps=1e-6,
     ):
-        """
-        MistralRMSNorm is equivalent to T5LayerNorm
-        """
-        hidden_size = config.hidden_size
-        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.weight = load_weight(model_path, weight_map, name, dtype, device)
         self.variance_epsilon = eps
 
     def forward(self, hidden_states):
@@ -256,10 +251,18 @@ class MistralDecoderLayer:
 
         self.mlp = MistralMLP(model_path, weight_map, device, dtype, config, layer_idx)
         self.input_layernorm = MistralRMSNorm(
-            model_path, weight_map, device, dtype, config, layer_idx
+            model_path,
+            weight_map,
+            f"layers.{layer_idx}.input_layernorm.weight",
+            device,
+            dtype,
         )
         self.post_attention_layernorm = MistralRMSNorm(
-            model_path, weight_map, device, dtype, config, layer_idx
+            model_path,
+            weight_map,
+            f"layers{layer_idx}.post_attention_layernorm.weight",
+            device,
+            dtype,
         )
 
     def forward(self, hidden_states, cu_seqlens, max_s, attn_mask=None):
