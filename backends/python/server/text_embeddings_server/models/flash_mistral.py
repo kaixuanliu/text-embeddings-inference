@@ -129,21 +129,21 @@ class MistralAttention:
         self.head_dim = config.head_dim
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
-        q_proj_weight = load_weight(
+        self.q_proj_weight = load_weight(
             model_path,
             weight_map,
             f"layers.{layer_idx}.self_attn.q_proj.weight",
             dtype,
             device,
         )
-        k_proj_weight = load_weight(
+        self.k_proj_weight = load_weight(
             model_path,
             weight_map,
             f"layers.{layer_idx}.self_attn.k_proj.weight",
             dtype,
             device,
         )
-        v_proj_weight = load_weight(
+        self.v_proj_weight = load_weight(
             model_path,
             weight_map,
             f"layers.{layer_idx}.self_attn.v_proj.weight",
@@ -157,11 +157,6 @@ class MistralAttention:
             dtype,
             device,
         )
-        self.qkv_weight = (
-            torch.cat([q_proj_weight, k_proj_weight, v_proj_weight])
-            .T.to(dtype)
-            .to(device)
-        )
 
         self.rotary_emb = MistralRotaryEmbedding(
             self.head_dim,
@@ -171,20 +166,18 @@ class MistralAttention:
 
     def forward(self, hidden_states, position_ids, cu_seqlens, max_s, attn_mask=None):
         bsz, q_len, _ = hidden_states.size()
-        qkv = F.linear(hidden_states, self.qkv_weight.T)
-        if hidden_states.dim() > 2:
-            bs = hidden_states.size(0)
-            q, k, v = qkv.view(bs, -1, self.num_heads * 3, self.head_dim).split(
-                self.num_heads, dim=2
-            )
-        else:
-            q, k, v = qkv.view(-1, self.num_heads * 3, self.head_dim).split(
-                self.num_heads, dim=1
-            )
 
-        q = q.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        v = v.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        query_states = F.linear(hidden_states, self.q_proj_weight)
+        key_states = F.linear(hidden_states, self.k_proj_weight)
+        value_states = F.linear(hidden_states, self.v_proj_weight)
+
+        q = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        k = key_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
+        v = value_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
 
         cos, sin = self.rotary_emb(v, position_ids)
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
@@ -206,6 +199,7 @@ class MistralAttention:
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(bsz, q_len, -1)
+        attn_output = F.linear(attn_output, self.o_proj_weight, bias=None)
         attn_output = self.o_proj(attn_output)
 
         return attn_output
@@ -247,11 +241,11 @@ class MistralMLP:
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, hidden_state):
-        gated_hidden_states = F.linear(hidden_state, self.gate_proj_weight.T)
-        uped_hidden_states = F.linear(hidden_state, self.up_proj_weight.T)
+        gated_hidden_states = F.linear(hidden_state, self.gate_proj_weight)
+        uped_hidden_states = F.linear(hidden_state, self.up_proj_weight)
         return F.linear(
             self.act_fn(gated_hidden_states * uped_hidden_states),
-            self.down_proj_weight.T,
+            self.down_proj_weight,
         )
 
 
@@ -285,21 +279,21 @@ class MistralDecoderLayer:
             dtype,
         )
 
-    def forward(self, hidden_states, cu_seqlens, max_s, attn_mask=None):
+    def forward(self, hidden_states, position_ids, cu_seqlens, max_s, attn_mask=None):
         residual = hidden_states
 
-        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = self.input_layernorm.forward(hidden_states)
 
         # Self Attention
         hidden_states = self.attention.forward(
-            hidden_states, cu_seqlens, max_s, attn_mask
+            hidden_states, position_ids, cu_seqlens, max_s, attn_mask
         )
         hidden_states = residual + hidden_states
 
         # Fully Connected
         residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.post_attention_layernorm.forward(hidden_states)
+        hidden_states = self.mlp.forward(hidden_states)
         hidden_states = residual + hidden_states
 
         return hidden_states
@@ -345,10 +339,6 @@ class FlashMistralModel:
             eps=config.rms_norm_eps,
         )
 
-        self.gradient_checkpointing = False
-        # Initialize weights and apply final processing
-        self.post_init()
-
     def forward(
         self,
         input_ids,
@@ -362,9 +352,11 @@ class FlashMistralModel:
         inputs_embeds = nn.functional.embedding(input_ids, self.word_embeddings_weight)
         hidden_states = inputs_embeds
         for layer in self.layers:
-            hidden_states = layer.forward(hidden_states, cu_seqlens, max_s, attn_mask)
+            hidden_states = layer.forward(
+                hidden_states, position_ids, cu_seqlens, max_s, attn_mask
+            )
 
-        hidden_states = self.norm(hidden_states)
+        hidden_states = self.norm.forward(hidden_states)
 
         return hidden_states
 
