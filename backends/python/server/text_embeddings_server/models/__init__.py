@@ -91,12 +91,21 @@ def get_model(model_path: Path, dtype: Optional[str], pool: str):
                 trust_remote=TRUST_REMOTE_CODE,
             )
     elif config.model_type == "mistral":
-        return FlashMistral(
-            model_path,
-            device,
-            datatype,
-            pool,
-        )
+        try:
+            return FlashMistral(
+                model_path,
+                device,
+                datatype,
+                pool,
+            )
+        except FileNotFoundError as e:
+            return DefaultModel(
+                model_path,
+                device,
+                datatype,
+                pool,
+                trust_remote=TRUST_REMOTE_CODE,
+            )
     else:
         if device.type == "hpu":
             from habana_frameworks.torch.hpu import wrap_in_hpu_graph

@@ -167,7 +167,6 @@ class MistralAttention:
 
     def forward(self, hidden_states, position_ids, cu_seqlens, max_s, attn_mask=None):
         bsz, q_len, _ = hidden_states.size()
-
         query_states = F.linear(hidden_states, self.q_proj_weight)
         key_states = F.linear(hidden_states, self.k_proj_weight)
         value_states = F.linear(hidden_states, self.v_proj_weight)
@@ -179,13 +178,10 @@ class MistralAttention:
         v = value_states.view(
             bsz, q_len, self.num_key_value_heads, self.head_dim
         ).transpose(1, 2)
-
         cos, sin = self.rotary_emb(v, position_ids)
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
-
         k = repeat_kv(k, self.num_key_value_groups)
         v = repeat_kv(v, self.num_key_value_groups)
-
         attn_output = torch.empty_like(q)
         attention(
             q,
@@ -195,9 +191,9 @@ class MistralAttention:
             cu_seqlens,
             max_s,
             self.softmax_scale,
+            is_causal=True,
             attn_mask=attn_mask,
         )
-
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(bsz, q_len, -1)
         attn_output = F.linear(attn_output, self.o_proj_weight, bias=None)
@@ -215,8 +211,6 @@ class MistralMLP:
         config: MistralConfig,
         layer_idx: Optional[int] = None,
     ):
-        self.hidden_size = config.hidden_size
-        self.intermediate_size = config.intermediate_size
         self.gate_proj_weight = load_weight(
             model_path,
             weight_map,
@@ -244,7 +238,7 @@ class MistralMLP:
         gated_hidden_states = F.linear(hidden_state, self.gate_proj_weight)
         uped_hidden_states = F.linear(hidden_state, self.up_proj_weight)
         return F.linear(
-            self.act_fn(gated_hidden_states * uped_hidden_states),
+            self.act_fn(gated_hidden_states) * uped_hidden_states,
             self.down_proj_weight,
         )
 
@@ -262,7 +256,6 @@ class MistralDecoderLayer:
         self.attention = MistralAttention(
             model_path, weight_map, device, dtype, config, layer_idx
         )
-
         self.mlp = MistralMLP(model_path, weight_map, device, dtype, config, layer_idx)
         self.input_layernorm = MistralRMSNorm(
             model_path,
@@ -270,7 +263,7 @@ class MistralDecoderLayer:
             f"layers.{layer_idx}.input_layernorm.weight",
             device,
             dtype,
-            eps=config.rms_norm_eps
+            eps=config.rms_norm_eps,
         )
         self.post_attention_layernorm = MistralRMSNorm(
             model_path,
@@ -278,14 +271,12 @@ class MistralDecoderLayer:
             f"layers.{layer_idx}.post_attention_layernorm.weight",
             device,
             dtype,
-            eps=config.rms_norm_eps
+            eps=config.rms_norm_eps,
         )
 
     def forward(self, hidden_states, position_ids, cu_seqlens, max_s, attn_mask=None):
         residual = hidden_states
-
         hidden_states = self.input_layernorm.forward(hidden_states)
-
         # Self Attention
         hidden_states = self.attention.forward(
             hidden_states, position_ids, cu_seqlens, max_s, attn_mask
@@ -344,7 +335,6 @@ class FlashMistralModel:
     def forward(
         self,
         input_ids,
-        token_type_ids,
         position_ids,
         cu_seqlens,
         max_s,
@@ -357,10 +347,11 @@ class FlashMistralModel:
             hidden_states = layer.forward(
                 hidden_states, position_ids, cu_seqlens, max_s, attn_mask
             )
-
         hidden_states = self.norm.forward(hidden_states)
-
-        return hidden_states
+        if mask is not None:
+            outputs = hidden_states[mask]
+            return outputs[cu_seqlens[:-1]]
+        return hidden_states[cu_seqlens[:-1]]
 
 
 class FlashMistral(Model):
@@ -420,7 +411,6 @@ class FlashMistral(Model):
 
         embedding = self.model.forward(
             input_ids=batch.input_ids,
-            token_type_ids=batch.token_type_ids,
             position_ids=batch.position_ids,
             cu_seqlens=cu_seqlens,
             max_s=max_input_lens,
