@@ -117,7 +117,7 @@ def attention(
                 max_s,
                 max_s,
                 softmax_scale,
-                is_causal=False,
+                is_causal,
             )
 
         else:

@@ -91,7 +91,6 @@ class MistralRotaryEmbedding(nn.Module):
         )
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
-    @torch.no_grad()
     def forward(self, x, position_ids):
         inv_freq_expanded = (
             self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
