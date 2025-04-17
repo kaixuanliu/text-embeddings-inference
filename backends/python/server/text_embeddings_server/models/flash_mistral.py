@@ -129,6 +129,7 @@ class MistralAttention:
         self.head_dim = config.head_dim
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
+        self.softmax_scale = self.head_dim**-0.5
         self.q_proj_weight = load_weight(
             model_path,
             weight_map,
@@ -200,7 +201,6 @@ class MistralAttention:
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(bsz, q_len, -1)
         attn_output = F.linear(attn_output, self.o_proj_weight, bias=None)
-        attn_output = self.o_proj(attn_output)
 
         return attn_output
 
@@ -270,6 +270,7 @@ class MistralDecoderLayer:
             f"layers.{layer_idx}.input_layernorm.weight",
             device,
             dtype,
+            eps=config.rms_norm_eps
         )
         self.post_attention_layernorm = MistralRMSNorm(
             model_path,
@@ -277,6 +278,7 @@ class MistralDecoderLayer:
             f"layers.{layer_idx}.post_attention_layernorm.weight",
             device,
             dtype,
+            eps=config.rms_norm_eps
         )
 
     def forward(self, hidden_states, position_ids, cu_seqlens, max_s, attn_mask=None):
@@ -395,19 +397,21 @@ class FlashMistral(Model):
     def embed(self, batch: Union[FlashBatch, PaddedBatch]) -> List[Embedding]:
         if isinstance(batch, PaddedBatch):
             input_lens = batch.attention_mask.cumsum(-1)[:, -1].to(torch.int32)
-            max_input_lens = input_lens.max().item()
+            max_input_lens = 0
             cu_seqlens = torch.cat(
                 (input_lens.new_tensor([0]), input_lens.cumsum(-1).int())
             )
             mask = batch.attention_mask.bool()
-            batch_size = input_lens.size(0)
+            bsz, tgt_len = mask.size()
+            min_val = torch.finfo(self.dtype).min
             attn_mask = torch.full(
-                [batch_size, 1, 1, mask.shape[-1]],
-                fill_value=torch.finfo(self.dtype).min,
+                [bsz, 1, tgt_len, tgt_len],
+                fill_value=min_val,
                 device=self.device,
                 dtype=self.dtype,
             )
-            attn_mask.masked_fill_(mask[:, None, None, :], 0)
+            expanded_mask = mask[:, None, None, :].expand(bsz, 1, tgt_len, tgt_len)
+            attn_mask = attn_mask.masked_fill(expanded_mask, 0.0)
         elif isinstance(batch, FlashBatch):
             cu_seqlens = batch.cu_seqlens
             mask = None
