@@ -281,7 +281,7 @@ class MistralDecoderLayer:
         residual = hidden_states
         hidden_states = self.input_layernorm.forward(hidden_states)
         # Self Attention
-        hidden_states = self.attention(
+        hidden_states = self.attention.forward(
             hidden_states, position_embeddings, cu_seqlens, max_s, attn_mask
         )
         hidden_states = residual + hidden_states
@@ -345,7 +345,7 @@ class FlashMistralModel:
     ):
         inputs_embeds = nn.functional.embedding(input_ids, self.word_embeddings_weight)
         hidden_states = inputs_embeds
-        position_embeddings = self.rotary_emb.forward(hidden_states, position_ids)
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
         for layer in self.layers:
             hidden_states = layer.forward(
                 hidden_states, position_embeddings, cu_seqlens, max_s, attn_mask
