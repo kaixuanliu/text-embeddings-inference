@@ -72,12 +72,16 @@ def hpu_attn(
 ):
     from habana_frameworks.torch.hpex.kernels import FusedSDPA
 
+    q = q.transpose(1, 2)
+    k = k.transpose(1, 2)
+    v = v.transpose(1, 2)
     if is_causal:
         attn_mask = None
 
     out_ = FusedSDPA.apply(
         q, k, v, attn_mask, 0.0, is_causal, softmax_scale, "fast", False
     )
+    out_ = out_.transpose(1, 2)
     out.copy_(out_)
     return out
 

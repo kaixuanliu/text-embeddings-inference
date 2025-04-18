@@ -22,7 +22,7 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
     cos = cos.unsqueeze(unsqueeze_dim)
     sin = sin.unsqueeze(unsqueeze_dim)
     q_embed = (q * cos) + (rotate_half(q) * sin)
@@ -169,20 +169,14 @@ class MistralAttention:
     def forward(
         self, hidden_states, position_embeddings, cu_seqlens, max_s, attn_mask=None
     ):
-        bsz, q_len, _ = hidden_states.size()
-        query_states = F.linear(hidden_states, self.q_proj_weight)
-        key_states = F.linear(hidden_states, self.k_proj_weight)
-        value_states = F.linear(hidden_states, self.v_proj_weight)
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
 
-        q = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        k = key_states.view(
-            bsz, q_len, self.num_key_value_heads, self.head_dim
-        ).transpose(1, 2)
-        v = value_states.view(
-            bsz, q_len, self.num_key_value_heads, self.head_dim
-        ).transpose(1, 2)
+        q = F.linear(hidden_states, self.q_proj_weight).view(hidden_shape)
+        k = F.linear(hidden_states, self.k_proj_weight).view(hidden_shape)
+        v = F.linear(hidden_states, self.v_proj_weight).view(hidden_shape)
         cos, sin = position_embeddings
-        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+        q, k = apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=2)
         attn_output = torch.empty_like(q)
         attention(
             q,
@@ -195,8 +189,7 @@ class MistralAttention:
             is_causal=True,
             attn_mask=attn_mask,
         )
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.view(bsz, q_len, -1)
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = F.linear(attn_output, self.o_proj_weight, bias=None)
 
         return attn_output
