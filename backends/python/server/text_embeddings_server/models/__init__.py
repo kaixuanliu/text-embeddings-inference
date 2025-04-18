@@ -90,7 +90,7 @@ def get_model(model_path: Path, dtype: Optional[str], pool: str):
                 pool,
                 trust_remote=TRUST_REMOTE_CODE,
             )
-    elif config.model_type == "mistral":
+    elif config.model_type == "mistral" and device.type == "hpu":
         try:
             return FlashMistral(
                 model_path,
