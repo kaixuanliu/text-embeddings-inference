@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from torch import nn
 import torch.nn.functional as F
-from typing import tuple, List, Union, Optional
+from typing import List, Union, Optional
 from safetensors import safe_open
 from transformers.activations import ACT2FN
 from transformers.models.mistral import MistralConfig
@@ -89,8 +89,9 @@ class MistralRMSNorm:
         return self.weight * hidden_states.to(input_dtype)
 
 
-class MistralRotaryEmbedding:
+class MistralRotaryEmbedding(nn.Module):
     def __init__(self, config: MistralConfig, device=None):
+        super().__init__()
         inv_freq, self.attention_scaling = compute_default_rope_parameters(
             config, device
         )
@@ -280,7 +281,7 @@ class MistralDecoderLayer:
         residual = hidden_states
         hidden_states = self.input_layernorm.forward(hidden_states)
         # Self Attention
-        hidden_states = self.attention.forward(
+        hidden_states = self.attention(
             hidden_states, position_embeddings, cu_seqlens, max_s, attn_mask
         )
         hidden_states = residual + hidden_states
